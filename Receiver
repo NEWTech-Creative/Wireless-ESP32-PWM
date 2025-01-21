@@ -1,0 +1,136 @@
+//Reciever code for an esp32 PWM - NEWTechCreative 2024
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include <ESP32Servo.h>
+
+const char* ssid = "COREXY_ESP32_transmitter_AP";
+const char* password = "12345678";
+
+WiFiUDP udp;
+const int udpPort = 1234;
+
+// GPIO Pin Assignments
+Servo myServo;
+const int servoPin = 5;      // GPIO pin for servo control
+const int laserPin = 4;      // GPIO pin for laser PWM control
+const int airPumpPin = 27;   // GPIO pin for air pump control
+const int airPumpInvertedPin = 25; // GPIO pin for inverted air pump control
+const int ledPin = 2;        // Onboard LED pin
+
+// Air Pump PWM Configuration
+const int airPumpChannel = 1;        // Dedicated PWM channel for air pump
+const int airPumpInvertedChannel = 2; // Dedicated PWM channel for inverted air pump
+const int airPumpFrequency = 150000; // 250 kHz frequency for air pump
+const int airPumpResolution = 16;   // 8-bit resolution (0-255)
+const int airPumpMaxDuty = 120;     // Full duty cycle for air pump ON
+const int airPumpMinDuty = 0;       // 0 duty cycle for air pump OFF
+
+// State Variables
+unsigned long lastPacketTime = 0;
+unsigned long connectionTimeout = 100;  // Timeout for detecting disconnection
+unsigned long lastLedBlinkTime = 0;
+unsigned long ledBlinkInterval = 1000;  // Default LED blink interval (servo mode)
+int currentMode = 1;  // Default to servo mode (1: servo, 0: laser)
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.softAP(ssid, password);
+
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("AP IP address: ");
+  Serial.println(IP);
+
+  pinMode(ledPin, OUTPUT);
+  digitalWrite(ledPin, LOW);  // Ensure LED is off initially
+
+  udp.begin(udpPort);
+
+  // Air Pump PWM Setup
+  ledcSetup(airPumpChannel, airPumpFrequency, airPumpResolution);
+  ledcAttachPin(airPumpPin, airPumpChannel);
+  ledcWrite(airPumpChannel, airPumpMinDuty);  // Ensure air pump starts OFF
+
+  // Inverted Air Pump PWM Setup
+  ledcSetup(airPumpInvertedChannel, airPumpFrequency, airPumpResolution);
+  ledcAttachPin(airPumpInvertedPin, airPumpInvertedChannel);
+  ledcWrite(airPumpInvertedChannel, airPumpMaxDuty); // Ensure inverted air pump starts ON
+
+  // Servo Initialization
+  myServo.attach(servoPin, 1000, 2100);  // Min and max pulse width for servo
+}
+
+void loop() {
+  char incomingPacket[255];
+  int packetSize = udp.parsePacket();
+
+  if (packetSize) {
+    int len = udp.read(incomingPacket, 255);
+    if (len > 0) {
+      incomingPacket[len] = 0;
+    }
+
+    int servoPulseWidth = 1500; // Default pulse width
+    int airPumpSignal = 0;      // Default air pump state
+    int mode = 1;               // Default mode (servo)
+
+    sscanf(incomingPacket, "%d,%d,%d", &servoPulseWidth, &airPumpSignal, &mode);
+
+    // Debugging: Print the received values
+    Serial.print("Servo Pulse Width: ");
+    Serial.println(servoPulseWidth);
+    Serial.print("Air Pump Signal: ");
+    Serial.println(airPumpSignal);
+    Serial.print("Mode: ");
+    Serial.println(mode);
+
+    // Update mode and adjust LED blink interval
+    if (mode != currentMode) {
+      currentMode = mode;
+      ledBlinkInterval = mode ? 1000 : 333;  // 1s for servo, 333ms for laser
+    }
+
+    // Independent Air Pump Control with Inverted Logic
+    if (airPumpSignal == 0) {
+      // Air pump should be ON when signal is 0
+      Serial.println("Air Pump: ON");
+      ledcWrite(airPumpChannel, airPumpMaxDuty);  // Max duty cycle for full power
+      ledcWrite(airPumpInvertedChannel, airPumpMinDuty); // Inverted air pump OFF
+    } else {
+      // Air pump should be OFF when signal is 1
+      Serial.println("Air Pump: OFF");
+      ledcWrite(airPumpChannel, airPumpMinDuty);  // 0 duty cycle to turn off
+      ledcWrite(airPumpInvertedChannel, airPumpMaxDuty); // Inverted air pump ON
+    }
+
+    // Servo Control
+    if (mode) {
+      // Servo mode
+      Serial.println("Servo mode active");
+      myServo.writeMicroseconds(servoPulseWidth);
+      analogWrite(laserPin, 0);  // Ensure laser is off in servo mode
+    } else {
+      // Laser mode
+      Serial.println("Laser mode active");
+      analogWrite(laserPin, map(servoPulseWidth, 1000, 2100, 0, 255));
+      myServo.detach();  // Detach servo to avoid jitter in laser mode
+    }
+
+    lastPacketTime = millis();
+  }
+
+  unsigned long currentTime = millis();
+  if (currentTime - lastPacketTime > connectionTimeout) {  // No packets received
+    Serial.println("Connection lost, turning off air pump");
+    digitalWrite(ledPin, HIGH);  // Turn LED red
+    ledcWrite(airPumpChannel, airPumpMinDuty);  // Ensure air pump is off for safety
+    ledcWrite(airPumpInvertedChannel, airPumpMaxDuty);  // Ensure inverted air pump is ON for safety
+  } else {
+    // Blink LED to indicate connection and mode
+    if (currentTime - lastLedBlinkTime >= ledBlinkInterval) {
+      digitalWrite(ledPin, !digitalRead(ledPin));  // Toggle LED state
+      lastLedBlinkTime = currentTime;
+    }
+  }
+
+  delay(2);  // Short delay for faster loop execution
+}
